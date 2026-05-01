@@ -15,6 +15,7 @@ An AI-powered web application that gives retail store managers a single-screen c
 - [API Reference](#api-reference)
 - [Running Locally with Docker](#running-locally-with-docker)
 - [Backend Deep Dive](#backend-deep-dive)
+- [AI / Bedrock Flow](#ai--bedrock-flow)
 - [Frontend Deep Dive](#frontend-deep-dive)
 - [Known Limitations & Future Work](#known-limitations--future-work)
 
@@ -49,26 +50,26 @@ All AI interactions go through a dedicated Prompt Service layer that communicate
 │  - Inventory Controller→ queries products + inventory      │
 │  - Copilot Controller  → session mgmt + message persist    │
 └──────────┬──────────────────────────┬───────────────────────┘
-           │ JDBC                     │ Internal REST
+           │ JDBC                     │ AWS SDK
 ┌──────────▼──────────┐   ┌───────────▼───────────────────────┐
-│  PostgreSQL 16      │   │  Prompt Service (stub)            │
-│  - stores           │   │  - Builds structured prompts      │
-│  - products         │   │  - Calls Amazon Bedrock           │
-│  - product_inventory│   │  - Returns fallback on failure    │
-│  - orders           │   └───────────────────────────────────┘
-│  - order_items      │
-│  - footfall_entries │
-│  - copilot_sessions │
-│  - copilot_messages │
-│  - quick_prompts    │
-└─────────────────────┘
+│  PostgreSQL 16      │   │  Bedrock Integration              │
+│  - stores           │   │  - PromptTemplates (prompt build) │
+│  - products         │   │  - PromptServiceClient (invoke)   │
+│  - product_inventory│   │  - BedrockResponseParser (parse)  │
+│  - orders           │   │  - Fallback handler               │
+│  - order_items      │   └──────────────┬────────────────────┘
+│  - footfall_entries │                  │ HTTPS
+│  - copilot_sessions │   ┌──────────────▼────────────────────┐
+│  - copilot_messages │   │  Amazon Bedrock                   │
+│  - quick_prompts    │   │  Claude Sonnet 4.6                │
+└─────────────────────┘   └───────────────────────────────────┘
 ```
 
 **Key design decisions:**
 
 - KPIs are computed at runtime from raw `orders` and `footfall_entries` tables — no pre-aggregated KPI table
 - AI responses are not persisted (stateless per request), except copilot chat messages which are stored in `copilot_messages`
-- The Prompt Service is a separate deployable unit — the backend calls it via internal REST. Currently stubbed with realistic responses
+- The Bedrock integration lives inside the backend — `PromptServiceClient` builds prompts, calls Claude, and parses responses. No separate microservice needed
 - All API responses use a standard envelope: `{ status, data, error, timestamp }`
 
 ---
@@ -83,7 +84,7 @@ All AI interactions go through a dedicated Prompt Service layer that communicate
 | Migrations | Flyway |
 | Containerization | Docker, Docker Compose |
 | Frontend serving | Nginx (production), Vite dev server (development) |
-| AI Integration | Amazon Bedrock — Claude Haiku 4.5 (`us.anthropic.claude-haiku-4-5-20251001-v1:0`) |
+| AI Integration | Amazon Bedrock — Claude Sonnet 4.6 (`us.anthropic.claude-sonnet-4-6`) |
 
 ---
 
@@ -262,7 +263,7 @@ cp .env.example .env
 AWS_REGION=us-east-1
 AWS_ACCESS_KEY_ID=your-access-key-id
 AWS_SECRET_ACCESS_KEY=your-secret-access-key
-BEDROCK_MODEL_ID=us.anthropic.claude-haiku-4-5-20251001-v1:0
+BEDROCK_MODEL_ID=us.anthropic.claude-sonnet-4-6
 ```
 
 > `.env` is gitignored — never commit real credentials.
@@ -347,7 +348,207 @@ AI features call Amazon Bedrock directly using the AWS SDK `BedrockRuntimeClient
 - **`BedrockResponseParser`** — parses Claude's JSON responses into typed DTOs. Handles markdown code fences, validates enum values, enforces item count limits (max 5 insights, max 3 recommendations)
 - **`PromptServiceClient`** — orchestrates the full call: build prompt → invoke Bedrock → parse response → return DTO. Throws `RuntimeException` on failure so the calling service falls back gracefully
 
-**Model:** Claude Haiku 4.5 (`us.anthropic.claude-haiku-4-5-20251001-v1:0`) via cross-region inference profile. The `us.` prefix is required for all Claude models from 3.5 onwards.
+**Model:** Claude Sonnet 4.6 (`us.anthropic.claude-sonnet-4-6`) via cross-region inference profile. The `us.` prefix is required for all Claude models from 3.5 onwards.
+
+---
+
+## AI / Bedrock Flow
+
+All three AI features (Insights, Recommendations, Copilot) share the same internal pipeline. Here is the complete flow for each.
+
+### How a prompt is built and sent
+
+Every AI call has two parts sent to Bedrock:
+
+**System prompt** — tells Claude what role to play. Fixed per feature, never changes at runtime.
+
+**User prompt** — built dynamically by injecting real store data (sales, footfall, low-stock items, conversation history) into a template string.
+
+The combined payload sent to Bedrock looks like this:
+
+```json
+{
+  "anthropic_version": "bedrock-2023-05-31",
+  "max_tokens": 1024,
+  "temperature": 0.7,
+  "system": "<system prompt>",
+  "messages": [
+    { "role": "user", "content": "<user prompt with live store data>" }
+  ]
+}
+```
+
+---
+
+### Feature 1 — AI Insights (`POST /api/v1/insights`)
+
+**Trigger:** Manager clicks "Analyze Sales" in the UI. The frontend sends the current KPI values it already has on screen.
+
+**System prompt:**
+```
+You are a retail analytics expert. Analyze store performance data and identify
+the top reasons behind sales fluctuations. Always respond with valid JSON only —
+no markdown, no explanation outside the JSON structure.
+```
+
+**User prompt (built from live KPI data):**
+```
+Store performance data for STORE-042 on 2026-05-01:
+- Daily sales: $12,450.75 (8.2% vs yesterday)
+- Customer footfall: 342 (-3.1% vs yesterday)
+- Low stock alerts: 3 items
+- Top low-stock products: Organic Milk 1L, Whole Wheat Bread, Free Range Eggs
+
+Identify the top reasons for the current sales performance.
+Return ONLY this JSON structure (no other text):
+{
+  "reasons": [
+    { "rank": 1, "description": "...", "category": "sales|footfall|inventory|staffing|external" }
+  ]
+}
+Return between 3 and 5 reasons. Each description must be one concise sentence.
+```
+
+**Claude returns:**
+```json
+{
+  "reasons": [
+    { "rank": 1, "description": "Footfall dropped 3.1% likely due to reduced morning commuter traffic.", "category": "footfall" },
+    { "rank": 2, "description": "Three critically low dairy products caused missed basket additions.", "category": "inventory" },
+    { "rank": 3, "description": "Sales per customer increased, offsetting the footfall decline.", "category": "sales" }
+  ]
+}
+```
+
+**Parser (`BedrockResponseParser.parseInsights`):**
+- Strips markdown code fences if Claude wrapped the JSON in ` ```json ``` `
+- Extracts the `reasons` array
+- Maps each item to `InsightReasonDto`
+- Sanitizes `category` to one of: `sales`, `footfall`, `inventory`, `staffing`, `external`
+- Enforces max 5 items
+
+**Response to frontend:**
+```json
+{
+  "storeCode": "STORE-042",
+  "generatedAt": "2026-05-01T09:15:02Z",
+  "reasons": [ ... ],
+  "isFallback": false
+}
+```
+
+---
+
+### Feature 2 — Recommendations (`POST /api/v1/recommendations`)
+
+**Trigger:** Manager clicks "Get Recommendations". Same store context as insights.
+
+**System prompt:**
+```
+You are a retail operations advisor. Generate prioritized corrective action
+recommendations based on store performance data. Always respond with valid JSON
+only — no markdown, no explanation outside the JSON structure.
+```
+
+**User prompt:**
+```
+Store performance data for STORE-042 on 2026-05-01:
+- Daily sales: $12,450.75 (8.2% vs yesterday)
+- Customer footfall: 342 (-3.1% vs yesterday)
+- Low stock alerts: 3 items
+- Top low-stock products: Organic Milk 1L, Whole Wheat Bread, Free Range Eggs
+
+Generate 2 to 3 prioritized corrective action recommendations.
+Return ONLY this JSON structure (no other text):
+{
+  "recommendations": [
+    {
+      "priority": "high|medium|low",
+      "category": "promotion|staffing|restocking",
+      "description": "...",
+      "actionLabel": "short CTA (2-3 words)"
+    }
+  ]
+}
+Sort by priority descending. Each description must be one actionable sentence.
+```
+
+**Claude returns:**
+```json
+{
+  "recommendations": [
+    { "priority": "high", "category": "restocking", "description": "Immediately restock Organic Milk 1L — only 2 units remain against a threshold of 10.", "actionLabel": "Restock Now" },
+    { "priority": "high", "category": "staffing",   "description": "Add one cashier during 11 AM–2 PM to reduce checkout wait times.", "actionLabel": "Adjust Schedule" },
+    { "priority": "medium", "category": "promotion", "description": "Run a weekend dairy promotion to recover footfall lost to competitor pricing.", "actionLabel": "Start Promotion" }
+  ]
+}
+```
+
+**Parser (`BedrockResponseParser.parseRecommendations`):**
+- Same JSON extraction as insights
+- Maps each item to `RecommendationItemDto` with a generated UUID
+- Sanitizes `priority` to `high`, `medium`, or `low`
+- Sanitizes `category` to `promotion`, `staffing`, or `restocking`
+- Enforces max 3 items
+
+---
+
+### Feature 3 — Copilot Chat (`POST /api/v1/copilot/query`)
+
+**Trigger:** Manager types a question or clicks a quick-prompt chip.
+
+**System prompt:**
+```
+You are a helpful retail store copilot assistant. Answer the store manager's
+question concisely and actionably using the provided store context.
+Keep responses under 150 words. Be direct and practical.
+```
+
+**User prompt (includes conversation history for context continuity):**
+```
+Current store context for STORE-042 on 2026-05-01:
+- Daily sales: $12,450.75 (8.2% vs yesterday)
+- Customer footfall: 342 (-3.1% vs yesterday)
+- Low stock alerts: 3 items
+- Top low-stock products: Organic Milk 1L, Whole Wheat Bread, Free Range Eggs
+
+Recent conversation:
+Manager: Give me a summary of today's store performance.
+Copilot: Sales are up 8.2% at $12,450. Footfall is slightly down 3.1%...
+
+Store manager asks: Which products need restocking most urgently?
+```
+
+The conversation history includes the **last 6 messages** from the session to keep Claude aware of what was already discussed, without exceeding token limits.
+
+**Claude returns:** Plain conversational text (no JSON required for chat).
+```
+Organic Milk 1L is most urgent — only 2 units left against a threshold of 10 (urgency score: 5.0).
+Free Range Eggs follow with 4 units vs threshold of 12. Whole Wheat Bread has 5 units vs 15.
+Prioritise restocking dairy first as it drives the highest basket additions.
+```
+
+**Parser (`BedrockResponseParser.parseCopilotReply`):** Just trims whitespace — no JSON parsing needed for conversational responses.
+
+---
+
+### Fallback strategy
+
+If Bedrock is unavailable (network error, invalid credentials, model access issue), `PromptServiceClient` throws a `RuntimeException`. The calling service catches it and returns a pre-defined fallback:
+
+```
+InsightService    → returns 1 generic reason with isFallback: true
+RecommendationService → returns 2 generic recommendations with isFallback: true
+CopilotService    → returns "AI service temporarily unavailable" message
+```
+
+The UI shows an amber info box for insights/recommendations, and a red-bordered chat bubble for the copilot — the app never crashes.
+
+---
+
+### Why store data comes from the frontend, not the DB
+
+The frontend already has the KPI values on screen (fetched from `GET /api/v1/kpis`). Rather than the backend re-querying the DB for every AI call, the frontend sends the current values as the `StoreContextRequest` body. This keeps AI calls stateless and fast — no extra DB round-trip needed per AI request.
 
 ---
 

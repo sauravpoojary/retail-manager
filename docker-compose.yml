@@ -41,7 +41,7 @@ services:
       AWS_ACCESS_KEY_ID:     ${AWS_ACCESS_KEY_ID:-}
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
       # Optional: override the Bedrock model
-      BEDROCK_MODEL_ID:      ${BEDROCK_MODEL_ID:-anthropic.claude-haiku-4-5-20251001-v1:0}
+      BEDROCK_MODEL_ID:      ${BEDROCK_MODEL_ID:-us.anthropic.claude-sonnet-4-6}
     ports:
       - "8080:8080"
     healthcheck:

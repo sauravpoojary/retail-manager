@@ -38,8 +38,8 @@ public class PromptServiceClient {
     private final BedrockResponseParser responseParser;
     private final ObjectMapper objectMapper;
 
-    // Claude Haiku 4.5 — fastest active model on Bedrock
-    @Value("${bedrock.model-id:anthropic.claude-haiku-4-5-20251001-v1:0}")
+    // Claude Sonnet 4.6 — active model, no use case form required
+    @Value("${bedrock.model-id:us.anthropic.claude-sonnet-4-6}")
     private String modelId;
 
     @Value("${bedrock.max-tokens:1024}")
