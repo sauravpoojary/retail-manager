@@ -32,6 +32,9 @@ server:
 aws:
   region: ${AWS_REGION:us-east-1}
 
+cors:
+  allowed-origins: ${ALLOWED_ORIGINS:*}
+
 bedrock:
   model-id: ${BEDROCK_MODEL_ID:us.anthropic.claude-sonnet-4-6}
   max-tokens: ${BEDROCK_MAX_TOKENS:1024}
