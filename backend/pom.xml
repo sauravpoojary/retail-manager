@@ -66,6 +66,24 @@
             <optional>true</optional>
         </dependency>
 
+        <!-- AWS Bedrock Runtime SDK -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>bedrockruntime</artifactId>
+            <version>2.25.60</version>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>sts</artifactId>
+            <version>2.25.60</version>
+        </dependency>
+
+        <!-- Jackson for Bedrock response parsing -->
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+        </dependency>
+
         <!-- Actuator (health endpoint for Docker healthcheck) -->
         <dependency>
             <groupId>org.springframework.boot</groupId>

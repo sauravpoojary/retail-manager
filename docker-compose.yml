@@ -35,6 +35,13 @@ services:
       DB_NAME:     copilot_db
       DB_USER:     copilot
       DB_PASSWORD: copilot
+      # AWS credentials for Bedrock — set these in your shell before running docker compose
+      # or create a .env file at the project root with these values
+      AWS_REGION:            ${AWS_REGION:-us-east-1}
+      AWS_ACCESS_KEY_ID:     ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      # Optional: override the Bedrock model
+      BEDROCK_MODEL_ID:      ${BEDROCK_MODEL_ID:-anthropic.claude-haiku-4-5-20251001-v1:0}
     ports:
       - "8080:8080"
     healthcheck:
