@@ -83,7 +83,7 @@ All AI interactions go through a dedicated Prompt Service layer that communicate
 | Migrations | Flyway |
 | Containerization | Docker, Docker Compose |
 | Frontend serving | Nginx (production), Vite dev server (development) |
-| AI Integration | Amazon Bedrock (Claude) — via Prompt Service stub |
+| AI Integration | Amazon Bedrock — Claude Haiku 4.5 (`us.anthropic.claude-haiku-4-5-20251001-v1:0`) |
 
 ---
 
@@ -236,7 +236,38 @@ All endpoints are under `/api/v1/`. Full contracts with example request/response
 
 ## Running Locally with Docker
 
-**Prerequisites:** Docker Desktop running
+**Prerequisites:** Docker Desktop running, AWS account with Bedrock access
+
+### 1. AWS Setup (one-time)
+
+**Create an IAM user for local development:**
+1. AWS Console → IAM → Users → Create user → name it `retail-copilot-dev`
+2. Attach policy: `AmazonBedrockFullAccess`
+3. Security credentials tab → Create access key → Local code → copy both values
+
+**Enable the Claude model:**
+1. AWS Console → Amazon Bedrock → Model catalog → search `Claude Haiku 4.5`
+2. Click it → Submit use case details (fill in company name + "retail store management dashboard for internal testing")
+3. Wait ~15 minutes for activation
+
+### 2. Create your `.env` file
+
+Copy `.env.example` to `.env` and fill in your credentials:
+
+```bash
+cp .env.example .env
+```
+
+```
+AWS_REGION=us-east-1
+AWS_ACCESS_KEY_ID=your-access-key-id
+AWS_SECRET_ACCESS_KEY=your-secret-access-key
+BEDROCK_MODEL_ID=us.anthropic.claude-haiku-4-5-20251001-v1:0
+```
+
+> `.env` is gitignored — never commit real credentials.
+
+### 3. Run
 
 ```bash
 # Clone the repo
@@ -307,9 +338,16 @@ WHERE store_id = ? AND status = 'completed'
 -- Trend % = ((today - yesterday) / yesterday) * 100
 ```
 
-### Prompt Service Client
+### Bedrock Integration
 
-`PromptServiceClient` is a stub that returns realistic hardcoded responses. To connect to a real Prompt Service, replace the `TODO` comments in each method with `RestClient` HTTP calls to `/internal/prompt/insights`, `/internal/prompt/recommendations`, and `/internal/prompt/query`.
+AI features call Amazon Bedrock directly using the AWS SDK `BedrockRuntimeClient`. The integration is in three classes:
+
+- **`BedrockConfig`** — creates the `BedrockRuntimeClient` bean using `DefaultCredentialsProvider` (reads from env vars, `~/.aws/credentials`, or EC2/ECS instance role automatically)
+- **`PromptTemplates`** — structured prompt strings for each feature (insights, recommendations, copilot). All prompts instruct Claude to return strict JSON for reliable parsing
+- **`BedrockResponseParser`** — parses Claude's JSON responses into typed DTOs. Handles markdown code fences, validates enum values, enforces item count limits (max 5 insights, max 3 recommendations)
+- **`PromptServiceClient`** — orchestrates the full call: build prompt → invoke Bedrock → parse response → return DTO. Throws `RuntimeException` on failure so the calling service falls back gracefully
+
+**Model:** Claude Haiku 4.5 (`us.anthropic.claude-haiku-4-5-20251001-v1:0`) via cross-region inference profile. The `us.` prefix is required for all Claude models from 3.5 onwards.
 
 ---
 
@@ -343,7 +381,6 @@ Every AI panel (`InsightPanel`, `RecommendationPanel`, `CopilotPanel`) handles t
 
 ## Known Limitations & Future Work
 
-- **Prompt Service is stubbed** — `PromptServiceClient` returns hardcoded responses. Real Amazon Bedrock integration requires implementing the `RestClient` calls and deploying the Prompt Service separately.
 - **Single store** — the seed data has one store (`STORE-042`). Multi-store support is schema-ready (all tables have `store_id`) but the frontend hardcodes `STORE-042`.
 - **No authentication** — there is no user login or session management beyond the copilot chat session. Adding Spring Security with JWT is the natural next step.
 - **Seed data footfall** — `V2__seed_data.sql` only inserts a few footfall rows. For realistic KPI trends, generate more rows covering multiple days.
