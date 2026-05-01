@@ -16,6 +16,7 @@ An AI-powered web application that gives retail store managers a single-screen c
 - [Running Locally with Docker](#running-locally-with-docker)
 - [Backend Deep Dive](#backend-deep-dive)
 - [AI / Bedrock Flow](#ai--bedrock-flow)
+- [Daily Demo Data (Auto-seed)](#daily-demo-data-auto-seed)
 - [Frontend Deep Dive](#frontend-deep-dive)
 - [Known Limitations & Future Work](#known-limitations--future-work)
 
@@ -549,6 +550,82 @@ The UI shows an amber info box for insights/recommendations, and a red-bordered 
 ### Why store data comes from the frontend, not the DB
 
 The frontend already has the KPI values on screen (fetched from `GET /api/v1/kpis`). Rather than the backend re-querying the DB for every AI call, the frontend sends the current values as the `StoreContextRequest` body. This keeps AI calls stateless and fast — no extra DB round-trip needed per AI request.
+
+---
+
+## Daily Demo Data (Auto-seed)
+
+> **Note:** This is a demo-only feature. Remove `DailySeedService` and `DailySeedRunner` before going to production.
+
+Every time the backend starts, it checks whether today's data already exists. If not, it automatically generates realistic random orders and footfall entries for **today** and **yesterday** so KPI trends are always meaningful.
+
+### How it works
+
+On startup, `DailySeedRunner` (an `ApplicationRunner`) calls `DailySeedService.seedTodayIfMissing()`:
+
+```
+Application starts
+      ↓
+DailySeedRunner.run()
+      ↓
+DailySeedService.seedTodayIfMissing()
+      ├── Does today have orders? → YES → skip
+      └── NO → generate orders + footfall for today
+      ├── Does yesterday have orders? → YES → skip
+      └── NO → generate orders + footfall for yesterday
+```
+
+Yesterday's data is always ensured so the trend % (today vs yesterday) is never `-100%`.
+
+### What gets generated
+
+| Data | Range | Distribution |
+|------|-------|-------------|
+| Orders per day | 60 – 140 orders | Weighted by time of day |
+| Order amount | $8 – $120 each | Uniform random |
+| Refund rate | ~5% of orders | Random |
+| Footfall per day | 200 – 500 entries | Weighted by time of day |
+
+**Time-of-day weighting** — both orders and footfall follow a realistic retail pattern:
+
+```
+08:00–11:00  Morning    20% of daily volume
+11:00–14:00  Lunch peak 35% of daily volume  ← busiest period
+14:00–17:00  Afternoon  25% of daily volume
+17:00–21:00  Evening    20% of daily volume
+```
+
+### Example KPI output after seed
+
+```json
+{
+  "dailySales": {
+    "amount": 11842.50,
+    "currency": "USD",
+    "trendPercent": 6.3,
+    "trendDirection": "up"
+  },
+  "footfall": {
+    "count": 387,
+    "trendPercent": -4.1,
+    "trendDirection": "down"
+  },
+  "lowStockAlertCount": 3
+}
+```
+
+Values change every day because the seed uses `Random` — so each morning you open the dashboard you'll see different numbers, making the AI insights and recommendations feel fresh and realistic.
+
+### Files involved
+
+| File | Purpose |
+|------|---------|
+| `service/DailySeedService.java` | Core logic — checks existence, generates orders + footfall |
+| `config/DailySeedRunner.java` | Spring `ApplicationRunner` — triggers seed on every startup |
+
+### To disable
+
+Comment out or delete `DailySeedRunner.java`. The `DailySeedService` bean will remain but never be called.
 
 ---
 
